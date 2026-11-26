@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Command line for the Apple Music tools. Run `am -h`."""
+import argparse
+import json
+import sys
+
+import core
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="am", description="Control your Apple Music library")
+    parser.add_argument("--json", action="store_true", help="raw JSON output")
+    subs = parser.add_subparsers(dest="tool", required=True)
+    for name, (_, desc, props, required, positional) in core.TOOLS.items():
+        sub = subs.add_parser(name.replace("_", "-"), help=desc, description=desc)
+        for key, spec in props.items():
+            kind = spec.get("type")
+            opts = {"help": spec.get("description")}
+            if "enum" in spec:
+                opts["choices"] = spec["enum"]
+            if kind == "integer":
+                opts["type"] = int
+            if key in positional:
+                if kind == "array":
+                    opts["nargs"] = "+" if key in required else "*"
+                elif key not in required:
+                    opts["nargs"] = "?"
+                sub.add_argument(key, **opts)
+            elif key == "confirm":
+                sub.add_argument("--yes", dest="confirm", action="store_true",
+                                 help="make the change (otherwise preview only)")
+            elif kind == "boolean":
+                sub.add_argument("--" + key.replace("_", "-"), dest=key,
+                                 action=argparse.BooleanOptionalAction, help=spec.get("description"))
+            elif kind == "array":
+                sub.add_argument("--" + key.replace("_", "-"), dest=key, nargs="+", **opts)
+            elif kind == "object":
+                sub.add_argument("--set", dest=key, action="append", metavar="FIELD=VALUE",
+                                 help="repeatable, e.g. --set rating=80", required=True)
+            else:
+                sub.add_argument("--" + key.replace("_", "-"), dest=key, **opts)
+
+    args = vars(parser.parse_args())
+    raw = args.pop("json")
+    tool = args.pop("tool").replace("-", "_")
+    args = {k: v for k, v in args.items() if v is not None}
+    if "fields" in args:
+        args["fields"] = parse_fields(args["fields"])
+    try:
+        result = core.call(tool, args)
+    except (core.MusicError, RuntimeError, OSError, ValueError) as e:
+        sys.exit(f"error: {e}")
+    show(tool, result, raw)
+
+
+TEXT_FIELDS = {"name", "artist", "albumArtist", "album", "composer", "genre",
+               "comment", "grouping", "lyrics"}
+
+
+def parse_fields(pairs):
+    fields = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            sys.exit(f"error: expected FIELD=VALUE, got {pair}")
+        if key not in TEXT_FIELDS:
+            try:
+                value = json.loads(value)
+            except ValueError:
+                sys.exit(f"error: {key} needs a number or true/false")
+        fields[key] = value
+    return fields
+
+
+def show(tool, result, raw):
+    if not raw and isinstance(result, dict) and set(result) == {"output"}:
+        print(result["output"])
+    elif not raw and tool in ("search", "playlist_tracks"):
+        for t in result["tracks"]:
+            print(f"{t['persistentID']}  {t['name']} | {t['artist']} | {t['album']}")
+        print(f"({result.get('total', len(result['tracks']))} songs)")
+    elif not raw and tool == "playlists":
+        for p in result:
+            kind = ("folder" if p["class"] == "folderPlaylist" else
+                    "editable" if p["editable"] else "read-only")
+            print(f"{p['persistentID']}  {p['trackCount']:>5}  {kind:<9}  {p['name']}")
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if isinstance(result, dict) and result.get("preview"):
+            print("\nPreview only. Nothing changed. Re-run with --yes to apply.", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
